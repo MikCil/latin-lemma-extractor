@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Latin Lemma Extractor (Perseus / PhiloLogic)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body {
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      margin: 0;
+      padding: 0;
+      background: #f5f5f7;
+      color: #222;
+    }
+    header {
+      background: #222;
+      color: #fff;
+      padding: 1rem;
+      text-align: center;
+    }
+    main {
+      max-width: 800px;
+      margin: 1.5rem auto;
+      padding: 1rem 1.25rem 2rem;
+      background: #fff;
+      box-shadow: 0 1px 4px rgba(0,0,0,0.1);
+      border-radius: 6px;
+    }
+    h1 {
+      font-size: 1.4rem;
+      margin: 0 0 0.75rem;
+    }
+    p.description {
+      font-size: 0.9rem;
+      margin-top: 0;
+      color: #555;
+    }
+    label {
+      display: block;
+      font-weight: 600;
+      margin-top: 0.75rem;
+      margin-bottom: 0.25rem;
+    }
+    input[type="text"], textarea, select {
+      width: 100%;
+      box-sizing: border-box;
+      padding: 0.45rem 0.6rem;
+      font-size: 0.95rem;
+      border-radius: 4px;
+      border: 1px solid #ccc;
+    }
+    textarea {
+      min-height: 60px;
+      resize: vertical;
+    }
+    .hint {
+      font-size: 0.8rem;
+      color: #666;
+      margin-top: 0.15rem;
+    }
+    button {
+      margin-top: 1rem;
+      padding: 0.5rem 1.25rem;
+      font-size: 0.95rem;
+      border-radius: 4px;
+      border: none;
+      cursor: pointer;
+      background: #0069d9;
+      color: #fff;
+    }
+    button:disabled {
+      opacity: 0.6;
+      cursor: wait;
+    }
+    #status {
+      margin-top: 1rem;
+      font-size: 0.9rem;
+      min-height: 1.2em;
+    }
+    #status.error {
+      color: #b00020;
+    }
+    #status.success {
+      color: #006400;
+    }
+    @media (max-width: 600px) {
+      main {
+        margin: 0.5rem;
+        padding: 0.75rem;
+      }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Latin Lemma Extractor (Perseus / PhiloLogic)</h1>
+  </header>
+  <main>
+    <p class="description">
+      Enter one or more Latin lemmas (OR search), and optionally restrict by author and work title.
+      The tool will query the <em>Latin</em> PhiloLogic instance at UChicago, extract concordance
+      contexts, and download a CSV.
+    </p>
+
+    <form id="lemma-form">
+      <label for="lemmas">Lemmas (OR):</label>
+      <textarea id="lemmas" name="lemmas" placeholder="inspicio invideo" required></textarea>
+      <div class="hint">Separate by space or comma. Example: <code>inspicio invideo</code></div>
+
+      <label for="author">Author (optional):</label>
+      <input id="author" name="author" type="text" placeholder="Vergil" />
+
+      <label for="title">Work title (optional):</label>
+      <input id="title" name="title" type="text" placeholder="Aeneid" />
+
+      <label for="filename">Output CSV file name:</label>
+      <input id="filename" name="filename" type="text" value="output.csv" />
+
+      <button type="submit" id="run-btn">Run query &amp; download CSV</button>
+    </form>
+
+    <div id="status"></div>
+  </main>
+
+  <script>
+    const BASE_QUERY_URL = "https://artflsrv03.uchicago.edu/philologic4/Latin/query";
+    const BASE_NAV_URL   = "https://artflsrv03.uchicago.edu/philologic4/Latin/";
+
+    const form   = document.getElementById("lemma-form");
+    const status = document.getElementById("status");
+    const runBtn = document.getElementById("run-btn");
+
+    function setStatus(message, kind = "") {
+      status.textContent = message;
+      status.className = "";
+      if (kind) status.classList.add(kind);
+    }
+
+    function parseLemmas(input) {
+      // split on whitespace or commas
+      return input
+        .split(/[\s,]+/)
+        .map(x => x.trim())
+        .filter(x => x.length > 0);
+    }
+
+    function buildQueryParams(lemmas, author, title, start, end) {
+      const lemmaParts = lemmas.map(l => `lemma:${l}`);
+      const q = lemmaParts.join(" | ");
+
+      const params = new URLSearchParams();
+      params.set("report", "concordance");
+      params.set("method", "proxy");
+      params.set("colloc_filter_choice", "frequency");
+      params.set("q", q);
+      params.set("start", String(start));
+      params.set("end", String(end));
+      params.set("direction", "");
+      params.set("metadata_sorting_field", "");
+      params.set("format", "json");
+
+      if (author) params.set("author", author);
+      if (title)  params.set("title", title);
+
+      return params;
+    }
+
+    async function fetchJson(params) {
+      const url = `${BASE_QUERY_URL}?${params.toString()}`;
+      const resp = await fetch(url, { method: "GET" });
+      if (!resp.ok) {
+        throw new Error(`HTTP ${resp.status} from server`);
+      }
+      return await resp.json();
+    }
+
+    function extractHighlightTokens(contextHtml) {
+      const tokens = [];
+      const div = document.createElement("div");
+      div.innerHTML = contextHtml;
+      const spans = div.querySelectorAll("span.highlight");
+      spans.forEach(span => {
+        const text = span.textContent.replace(/\s+/g, " ").trim();
+        if (text) tokens.push(text);
+      });
+      return tokens;
+    }
+
+    function cleanContext(contextHtml) {
+      const div = document.createElement("div");
+      div.innerHTML = contextHtml;
+      let text = div.textContent || div.innerText || "";
+      text = text.replace(/\s+/g, " ").trim();
+      // Remove spaces before punctuation
+      text = text.replace(/\s+([,.;:?!])/g, "$1");
+      // Remove spaces after opening quote “
+      text = text.replace(/“\s+/g, "“");
+      return text;
+    }
+
+    function abbreviateWord(word, length = 3) {
+      const lettersOnly = (word || "").replace(/[^A-Za-z]+/g, "");
+      if (!lettersOnly) return "";
+      return lettersOnly.slice(0, length);
+    }
+
+    function buildPassageUrl(citation_links) {
+      if (!citation_links) return "";
+      let raw = citation_links.para || citation_links.line || citation_links.doc;
+      if (!raw) return "";
+      // If '?byte=' already present, ensure there's a trailing slash before '?'
+      if (raw.includes("?")) {
+        const [path, query] = raw.split("?", 2);
+        const adjustedPath = path.endsWith("/") ? path : path + "/";
+        raw = `${adjustedPath}?${query}`;
+      }
+      // join with base nav URL
+      return new URL(raw, BASE_NAV_URL).toString();
+    }
+
+    function extractRows(data, lemmas) {
+      const results = data.results || [];
+      const rows = [];
+
+      const lemmaValue = (lemmas.length === 1)
+        ? lemmas[0]
+        : lemmas.join(";");
+
+      for (const result of results) {
+        const contextHtml = result.context || "";
+        const tokens = extractHighlightTokens(contextHtml);
+        const sentence = cleanContext(contextHtml);
+
+        const metadata = result.metadata_fields || {};
+        const author   = (metadata.author || "").trim();
+        const title    = (metadata.title  || "").trim();
+        const docId    = (metadata.philo_doc_id || "").trim();
+        const lineN    = (metadata.n || "").trim();
+
+        const authorCode = abbreviateWord(author || "Unknown");
+        const titleCode  = abbreviateWord(title || "Work");
+
+        const passageUrl = buildPassageUrl(result.citation_links || {});
+
+        const toks = (tokens.length > 0) ? tokens : [""];
+
+        toks.forEach((token, idx) => {
+          const tokenIndex = idx + 1;
+          const idCore  = `${docId}.${lineN}.${tokenIndex}.`;
+          const suffix  = (authorCode || titleCode) ? `${authorCode}_${titleCode}` : "";
+          const uniqueId = `${idCore}${suffix}`;
+
+          rows.push({
+            ID:       uniqueId,
+            TOKEN:    token,
+            LEMMA:    lemmaValue,
+            SENTENCE: sentence,
+            author:   author,
+            title:    title,
+            language: "Latin",
+            passage:  passageUrl
+          });
+        });
+      }
+
+      return rows;
+    }
+
+    function escapeCsv(value) {
+      const v = String(value).replace(/"/g, '""');
+      return `"${v}"`;
+    }
+
+    function rowsToCsv(rows) {
+      const header = ["ID", "TOKEN", "LEMMA", "SENTENCE", "author", "title", "language", "passage"];
+      const lines = [];
+
+      lines.push(header.map(col => escapeCsv(col)).join(","));
+
+      for (const row of rows) {
+        const line = header.map(col => escapeCsv(row[col] || "")).join(",");
+        lines.push(line);
+      }
+
+      return lines.join("\r\n");
+    }
+
+    function downloadCsv(csvText, filename) {
+      const blob = new Blob([csvText], { type: "text/csv;charset=utf-8;" });
+      const url  = URL.createObjectURL(blob);
+      const a    = document.createElement("a");
+      a.href = url;
+      a.download = filename || "output.csv";
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    }
+
+    async function handleSubmit(event) {
+      event.preventDefault();
+      setStatus("", "");
+      runBtn.disabled = true;
+
+      try {
+        const lemmaInput = document.getElementById("lemmas").value;
+        const author     = document.getElementById("author").value.trim();
+        const title      = document.getElementById("title").value.trim();
+        const filename   = document.getElementById("filename").value.trim() || "output.csv";
+
+        const lemmas = parseLemmas(lemmaInput);
+        if (lemmas.length === 0) {
+          setStatus("Please enter at least one lemma.", "error");
+          return;
+        }
+
+        setStatus("Querying server (step 1 of 2)...");
+
+        // Step 1: end=0 to get results_length
+        const paramsInitial = buildQueryParams(lemmas, author, title, 0, 0);
+        const dataInitial   = await fetchJson(paramsInitial);
+        const resultsLength = parseInt(dataInitial.results_length || "0", 10) || 0;
+
+        if (resultsLength === 0) {
+          setStatus("No results found for this query. Empty CSV downloaded.", "success");
+          downloadCsv(rowsToCsv([]), filename);
+          return;
+        }
+
+        setStatus(`Found ${resultsLength} result(s). Downloading full data (step 2 of 2)...`);
+
+        // Step 2: fetch all results
+        const paramsFull = buildQueryParams(lemmas, author, title, 1, resultsLength);
+        const dataFull   = await fetchJson(paramsFull);
+
+        const rows = extractRows(dataFull, lemmas);
+        const csv  = rowsToCsv(rows);
+
+        downloadCsv(csv, filename);
+        setStatus(`Extracted ${rows.length} tokens into ${filename}`, "success");
+      } catch (err) {
+        console.error(err);
+        setStatus("Error: " + err.message, "error");
+      } finally {
+        runBtn.disabled = false;
+      }
+    }
+
+    form.addEventListener("submit", handleSubmit);
+  </script>
+</body>
+</html>
