@@ -112,14 +112,14 @@
       <div class="hint">Choose the corpus to query.</div>
 
       <label for="lemmas">Lemmas (OR):</label>
-      <textarea id="lemmas" name="lemmas" placeholder="inspicio invideo or πόλις" required></textarea>
-      <div class="hint">Separate by space or comma. Examples: <code>inspicio invideo</code> or <code>πόλις</code>.</div>
+      <textarea id="lemmas" name="lemmas" placeholder="aspicio or πόλις" required></textarea>
+      <div class="hint">Separate by space or comma. Examples: <code>aspicio</code> or <code>πόλις</code>.</div>
 
       <label for="author">Author (optional):</label>
-      <input id="author" name="author" type="text" placeholder="Vergil or Xenophon" />
+      <input id="author" name="author" type="text" placeholder="Caesar or Xenophon" />
 
       <label for="title">Work title (optional):</label>
-      <input id="title" name="title" type="text" placeholder="Aeneid or Anabasis" />
+      <input id="title" name="title" type="text" placeholder="Gallic War or Anabasis" />
 
       <label for="filename">Output CSV file name:</label>
       <input id="filename" name="filename" type="text" value="output.csv" />
@@ -218,12 +218,6 @@
       return text;
     }
 
-    function abbreviateWord(word, length = 3) {
-      const lettersOnly = (word || "").replace(/[^A-Za-z]+/g, "");
-      if (!lettersOnly) return "";
-      return lettersOnly.slice(0, length);
-    }
-
     function buildPassageUrl(citation_links, baseNavUrl) {
       if (!citation_links) return "";
       let raw = citation_links.para || citation_links.line || citation_links.doc;
@@ -235,6 +229,73 @@
         raw = `${path}?${parts[1]}`;
       }
       return new URL(raw, baseNavUrl).toString();
+    }
+
+    function buildUniqueId(result) {
+      const metadata = result.metadata_fields || {};
+      let docId = (metadata.philo_doc_id || "").toString().trim();
+
+      if (!docId) {
+        const philoId = result.philo_id;
+        if (Array.isArray(philoId) && philoId.length > 0) {
+          docId = String(philoId[0]);
+        }
+      }
+
+      const citation = result.citation || [];
+      let docLabel = "";
+      const divLabels = [];
+      let byte = "";
+
+      citation.forEach(cit => {
+        const objType = (cit.object_type || "").toLowerCase();
+        const label   = (cit.label || "").trim();
+
+        if (objType === "doc" && label && !docLabel) {
+          docLabel = label;
+        }
+
+        if (objType.startsWith("div") && label) {
+          divLabels.push(label);
+        }
+
+        const href = cit.href || "";
+        if (!byte && href) {
+          const m = href.match(/byte=(\d+)/);
+          if (m) byte = m[1];
+        }
+      });
+
+      const limitedDivs = divLabels.slice(0, 3);
+
+      if (!byte) {
+        const cl = result.citation_links || {};
+        for (const key of ["para", "line", "doc"]) {
+          const href = cl[key] || "";
+          const m = href && href.match(/byte=(\d+)/);
+          if (m) {
+            byte = m[1];
+            break;
+          }
+        }
+      }
+
+      const parts = [];
+      if (docId) parts.push(docId);
+      parts.push(...limitedDivs);
+      if (byte) parts.push(byte);
+
+      const baseId = parts.join(".");
+
+      let labelClean = "";
+      if (docLabel) {
+        // "Caes. Gal." -> "Caes.Gal."
+        labelClean = docLabel.replace(/\s+/g, "");
+      }
+
+      if (baseId && labelClean) return `${baseId}_${labelClean}`;
+      if (baseId) return baseId;
+      return labelClean;
     }
 
     function extractRows(data, lemmas, language, baseNavUrl) {
@@ -253,22 +314,13 @@
         const metadata = result.metadata_fields || {};
         const author   = (metadata.author || "").trim();
         const title    = (metadata.title  || "").trim();
-        const docId    = (metadata.philo_doc_id || "").trim();
-        const lineN    = (metadata.n || "").trim();
-
-        const authorCode = abbreviateWord(author || "Unknown");
-        const titleCode  = abbreviateWord(title || "Work");
 
         const passageUrl = buildPassageUrl(result.citation_links || {}, baseNavUrl);
+        const uniqueId   = buildUniqueId(result);
 
         const toks = (tokens.length > 0) ? tokens : [""];
 
-        toks.forEach((token, idx) => {
-          const tokenIndex = idx + 1;
-          const idCore  = `${docId}.${lineN}.${tokenIndex}.`;
-          const suffix  = (authorCode || titleCode) ? `${authorCode}_${titleCode}` : "";
-          const uniqueId = `${idCore}${suffix}`;
-
+        toks.forEach(token => {
           rows.push({
             ID:       uniqueId,
             TOKEN:    token,
@@ -372,5 +424,3 @@
   </script>
 </body>
 </html>
-
-
